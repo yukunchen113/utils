@@ -5,6 +5,7 @@ import os
 import gzip
 import pickle
 import scipy as scp
+import random
 import time
 import lycon
 import h5py
@@ -108,7 +109,28 @@ def get_celeba_data(datapath, save_new=False):
 	dataset.get_images_from_filenames(filenames[:500])
 	dataset.save_file(images_saved_path)
 """
-def get_celeba_data(datapath, save_new=False):
+def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuffle=True, max_len_only=True):
+	"""
+	This will retrieve the celeba dataset
+
+	Examples:
+		>>> dataset, get_group = gu.get_celeba_data(gc.datapath, group_num=1)
+		>>> images_1, labels_1 = get_group()
+		>>> images_2, labels_2 = get_group()
+
+	Args:
+		datapath:  This is the datapath the the general data folder
+		save_new:  saves a hdf5 dataset if true, or not available. uses old one if false
+		get_group:  Makes this function return dataset and group objects (for chunked data loading),
+			otherwise, load all images and labels. get_group is an iterator which will load data.
+		group_num:  The number of groups to load at once
+		shuffle:  Shuffles the groups, if loading with groups
+		max_len_only:  This will force the groups to be of max length.
+		preprocess_fn: This is a function object of any kind of preprocessing to do on the images. This function must only take in images as inputs.
+
+	Returns:
+		data, labels if not get group, else dataset object, get_group object.
+	"""
 	#loads from numpy file, if available or specified, else save to numpy file
 	datapath = os.path.join(datapath, "celeba")
 	labels_file = "list_attr_celeba.txt"
@@ -119,7 +141,7 @@ def get_celeba_data(datapath, save_new=False):
 
 	dataset = get_data()
 	if not save_new:
-		ret = dataset.load(images_saved_path)
+		ret = dataset.possible_load_group_indicies(images_saved_path, shuffle)
 		if ret:
 			save_new = True
 
@@ -130,7 +152,6 @@ def get_celeba_data(datapath, save_new=False):
 			total_labels = f.readlines()
 
 		#get the labels:
-		num_images = int(total_labels[0])
 		filenames = []
 		labels = []
 		labels_names = total_labels[1].split()
@@ -143,6 +164,15 @@ def get_celeba_data(datapath, save_new=False):
 		dataset.set_labels(labels)
 		dataset.get_images_from_filenames(filenames)
 		dataset.save_file(images_saved_path)
+	
+	if get_group:
+		#returns dataset_object and the get next method
+		dataset.possible_load_group_indicies(images_saved_path, shuffle, max_len_only)
+		return dataset, lambda group_num=group_num, random_selection=True, remove_past=False: dataset.get_next_group(
+								random_selection, group_num, remove_past)
+		 
+	else:
+		dataset.load()
 
 	return dataset.images, dataset.labels
 
@@ -154,25 +184,88 @@ class get_data():
 	def __init__(self):
 		self.images = None
 		self.labels = None
+		self.groups_list = None
+		self.cur_group_index = 0
+		self.max_len = None
+		self.data_savepath = None
+		self.last_group_list = None
+	def load(self, group_indicies=None):
+		"""
+		This will load the groups, given the indices
+		:param group_indicies: the indicies of the group to load
+		:return: 0: success, -1: no path found
+		"""
+		if not os.path.exists(self.data_savepath):
+			print("Must call possible_load_group_indicies first!")
+			return -1
+		#load the data
+		total_images = None
+		total_labels = None
+		if group_indicies is None: 
+			group_indicies = self.groups_list
 
-	def load(self, save_path):
+		with h5py.File(self.data_savepath, "r") as file:
+			for v in group_indicies:
+				if total_images is None:
+					total_images = file["images"][v][()]
+					total_labels = file["labels"][v][()]
+				else:
+					total_images = np.concatenate((total_images, file["images"][v][()]),axis=0)
+					total_labels = np.concatenate((total_labels, file["labels"][v][()]),axis=0)
+		a = total_images[0]
+		self.images = total_images
+		self.labels = total_labels
+		return 0
+
+	def get_next_group(self, random_selection=True, group_num=1, remove_past_groups=False):
 		"""
-		loads images from a saved path and sets it as self.images
-		Args:
-			save_path
-				- the path of the saved file
-		Returns:
-			 0: success
-			-1: no path found
+		This function is an iterator, will iterate through the groups in an hdf5 file.
+		:param random_selection: whether to select the group randomly or not.
+		:param group_num: The number of groups to load per batch.
+		:param remove_past_groups: This is a boolean, if true, will remove the next group number(s) from the iterating
+		dataset, otherwise, iterate in a loop, as each get_next_group() is called.
+		:return:images, labels.
 		"""
+		#gets the next group, either a random selection, or increment the list
+		assert group_num > 0
+		groups=[]
+		assert len(self.groups_list), "no more groups, empty groups array."
+		for i in range(group_num):
+			idx = self.cur_group_index if not random_selection else random.randint(0, len(self.groups_list)-1)
+			if not remove_past_groups:
+				groups.append(self.groups_list[idx % len(self.groups_list)])
+			else:
+				groups.append(self.groups_list.pop(idx % len(self.groups_list)))
+			self.cur_group_index+=1
+		print(groups)
+		self.load(groups)
+		self.last_group_list = groups
+		return self.images, self.labels
+
+	def possible_load_group_indicies(self, save_path, shuffle=True, max_len_only=False):
+		"""
+		This is the possible indices that you can pick a group from.
+		:param save_path: the path of the saved file
+		:param shuffle: group_indicies the indicies of the group to load
+		:param max_len_only: This will force the groups to be of max length.
+		:return: groups_list: possible groups to load, -1: no path found
+		"""
+		#gets the possible groups to load.
 		if not os.path.exists(save_path):
 			print("no path found!")
 			return -1
+
 		#load the data
 		with h5py.File(save_path, "r") as file:
-			self.images = file["images"][()]
-			self.labels = file["labels"][()]
+			groups_list= [k for k in file["images"].keys()]
+			max_len = max([file["images"][k].attrs["length"] for k in groups_list])
+			groups_list = [k for k in file["images"].keys() if not max_len_only or file["images"][k].attrs["length"] >= max_len]
+			if shuffle:
+				random.shuffle(groups_list)
+		self.groups_list = groups_list
+		self.data_savepath = save_path
 		return 0
+
 
 	def save_file(self, save_path, groups=1000):
 		"""
@@ -199,10 +292,18 @@ class get_data():
 		else:
 			pass
 		assert len(self.labels) == len(self.images)
-		with h5py.File(save_path, "w") as file:
-			idset = file.create_dataset("images", data=self.images)
-			ldset = file.create_dataset("labels", data=self.labels)
 
+		with h5py.File(save_path, "w") as file:
+			labels_grp = file.create_group("labels")
+			images_grp = file.create_group("images")
+			num_data = self.labels.shape[0]
+			for i in range(num_data//groups+int(bool(num_data%groups))):
+				data_start_index = i*groups
+				data_end_index = data_start_index+min(groups, num_data-data_start_index)
+				ldset = labels_grp.create_dataset("%d"%i, data=self.labels[data_start_index:data_end_index])
+				idset = images_grp.create_dataset("%d"%i, data=self.images[data_start_index:data_end_index])
+				ldset.attrs["length"] = data_end_index - data_start_index
+				idset.attrs["length"] = data_end_index - data_start_index
 
 
 
@@ -221,18 +322,42 @@ class get_data():
 			filenames_list:
 				- list of the filenames for each of the images.
 		"""
+		#tf.enable_eager_execution()
 		images = None
+		#filenames_list = np.asarray(filenames_list).reshape(-1,)
 		for i in range(len(filenames_list)):
-			print(loading_bar(i, len(filenames_list)), end="\r")
+			print("\r"+loading_bar(i, len(filenames_list)), end="")
 			image = lycon.load(filenames_list[i])
+			#print("MIN, MAX", np.amin(image.numpy()), np.amax(image.numpy()))
 			if images is None:
-				images = np.zeros((len(filenames_list), *image.shape), np.int8)
+				images = np.zeros((len(filenames_list), *image.shape), np.uint8)
 				images[i] = image
 			else:
 				images[i] = image
+
 		print()
 		self.images = images
-		
+		#tf.disable_eager_execution()
+
+
+def shuffle_arrays(*args, **kwargs):
+	"""
+	Takes in arrays of the same length in the 0th axis and shuffles them the same way
+
+	Args:
+		*args: numpy arrays.
+		**kwargs: numpy arrays.
+
+	Returns:
+		arrays in the same order as been put in.
+	"""
+	args = list(args) + list(kwargs.values())
+	idx = np.arange(args[0].shape[0])
+	np.random.shuffle(idx)
+	new_data = []
+	for i in args:
+		new_data.append(i[idx])
+	return new_data
 
 def cross_entropy(inputs, pred, epsilon=1e-7):
 	#we need to flatten our data, so we can reduce it per batch.
@@ -248,6 +373,8 @@ def cross_entropy(inputs, pred, epsilon=1e-7):
 def kl_divergence(mean, log_var):
 	return 0.5*tf.reduce_sum(tf.exp(log_var)+tf.square(mean)-1-log_var,axis=1)
 
+
+
 def create_image_grid(images, aspect_ratio=[1,1]):
 	#will create a 2D array of images to be as close to the specified aspect ratio as possible.
 	#assumes that images will be able to cover the specified aspect ration min num images = aspect_ratio[1]*aspect_ratio[2]
@@ -261,10 +388,10 @@ def create_image_grid(images, aspect_ratio=[1,1]):
 			break
 		bounding_box+=1
 
-	final_image = np.zeros((bounding_box[0]*images.shape[1], bounding_box[1]*images.shape[2]))
+	final_image = np.zeros((bounding_box[0]*images.shape[1], bounding_box[1]*images.shape[2], images.shape[3]))
 	#fill the available bounding box
 	for i in range(num_images):
 		row_num = i%bounding_box[0]*images.shape[1]
 		col_num = i//bounding_box[0]%bounding_box[1]*images.shape[2]
-		final_image[row_num:row_num+images.shape[1], col_num:col_num+images.shape[2]] = images[i,:,:,0]
-	return final_image
+		final_image[row_num:row_num+images.shape[1], col_num:col_num+images.shape[2]] = images[i,:,:,:]
+	return np.squeeze(final_image)
