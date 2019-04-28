@@ -109,7 +109,7 @@ def get_celeba_data(datapath, save_new=False):
 	dataset.get_images_from_filenames(filenames[:500])
 	dataset.save_file(images_saved_path)
 """
-def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuffle=True, max_len_only=True):
+def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuffle=False, max_len_only=True):
 	"""
 	This will retrieve the celeba dataset
 
@@ -234,9 +234,9 @@ class get_data():
 			idx = self.cur_group_index if not random_selection else random.randint(0, len(self.groups_list)-1)
 			if not remove_past_groups:
 				groups.append(self.groups_list[idx % len(self.groups_list)])
+				self.cur_group_index+=1
 			else:
 				groups.append(self.groups_list.pop(idx % len(self.groups_list)))
-			self.cur_group_index+=1
 		print(groups)
 		self.load(groups)
 		self.last_group_list = groups
@@ -260,6 +260,7 @@ class get_data():
 			groups_list= [k for k in file["images"].keys()]
 			max_len = max([file["images"][k].attrs["length"] for k in groups_list])
 			groups_list = [k for k in file["images"].keys() if not max_len_only or file["images"][k].attrs["length"] >= max_len]
+			groups_list = [i for _,i in sorted(zip([int(i) for i in groups_list], groups_list))]
 			if shuffle:
 				random.shuffle(groups_list)
 		self.groups_list = groups_list
