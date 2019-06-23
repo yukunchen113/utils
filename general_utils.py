@@ -109,7 +109,7 @@ def get_celeba_data(datapath, save_new=False):
 	dataset.get_images_from_filenames(filenames[:500])
 	dataset.save_file(images_saved_path)
 """
-def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuffle=False, max_len_only=True):
+def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuffle=False, max_len_only=True, is_HD=True, **kwargs):
 	"""
 	This will retrieve the celeba dataset
 
@@ -126,26 +126,32 @@ def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuff
 		group_num:  The number of groups to load at once
 		shuffle:  Shuffles the groups, if loading with groups
 		max_len_only:  This will force the groups to be of max length.
-		preprocess_fn: This is a function object of any kind of preprocessing to do on the images. This function must only take in images as inputs.
+		is_HD: Whether to extract the hd version (True) or default version (False)
+		**kwargs: These are any other irrelevant kwargs.
 
 	Returns:
 		data, labels if not get group, else dataset object, get_group object.
 	"""
 	#loads from numpy file, if available or specified, else save to numpy file
-	datapath = os.path.join(datapath, "celeba")
+	if is_HD:
+		datapath = os.path.join(datapath, "celeba_HD", "dataset")
+	else:
+		datapath = os.path.join(datapath, "celeba")
 	labels_file = "list_attr_celeba.txt"
 	images_saved_file = "images_saved.hdf5"
 	images_saved_path = os.path.join(datapath, images_saved_file)
 	labels_path = os.path.join(datapath, labels_file)
 	images_path = os.path.join(datapath, "images")
 
-	dataset = get_data()
+	dataset = get_data(images_saved_path)
 	if not save_new:
 		ret = dataset.possible_load_group_indicies(images_saved_path, shuffle)
 		if ret:
 			save_new = True
 
 	if save_new:
+		if os.path.exists(images_saved_path):
+			os.remove(images_saved_path)
 		#get the labels and images filenames:
 		#get previous saved path.
 		with open(labels_path,"r") as f:
@@ -161,13 +167,11 @@ def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuff
 			filenames.append(os.path.join(images_path, line.split()[0]))
 		labels = (np.asarray(labels).astype(int)+1)/2
 		
-		dataset.set_labels(labels)
-		dataset.get_images_from_filenames(filenames)
-		dataset.save_file(images_saved_path)
+		dataset.save_by_group(labels, filenames, 64)
 	
 	if get_group:
 		#returns dataset_object and the get next method
-		dataset.possible_load_group_indicies(images_saved_path, shuffle, max_len_only)
+		dataset.possible_load_group_indicies(shuffle, max_len_only)
 		return dataset, lambda group_num=group_num, random_selection=True, remove_past=False: dataset.get_next_group(
 								random_selection, group_num, remove_past)
 		 
@@ -181,14 +185,21 @@ def get_celeba_data(datapath, save_new=False, get_group=True, group_num=1, shuff
 
 class get_data():
 	#this will get the image data.
-	def __init__(self):
+	def __init__(self, save_path):
 		self.images = None
 		self.labels = None
 		self.groups_list = None
 		self.cur_group_index = 0
 		self.max_len = None
-		self.data_savepath = None
 		self.last_group_list = None
+		self.data_savepath = save_path
+
+	def get_group_size(self):
+		save_path = self.data_savepath
+		with h5py.File(save_path, "r") as file:
+			group_size = file["images"]["0"].shape[0]
+		return group_size
+
 	def load(self, group_indicies=None):
 		"""
 		This will load the groups, given the indices
@@ -242,15 +253,15 @@ class get_data():
 		self.last_group_list = groups
 		return self.images, self.labels
 
-	def possible_load_group_indicies(self, save_path, shuffle=True, max_len_only=False):
+	def possible_load_group_indicies(self, shuffle=True, max_len_only=False):
 		"""
 		This is the possible indices that you can pick a group from.
-		:param save_path: the path of the saved file
 		:param shuffle: group_indicies the indicies of the group to load
 		:param max_len_only: This will force the groups to be of max length.
 		:return: groups_list: possible groups to load, -1: no path found
 		"""
 		#gets the possible groups to load.
+		save_path = self.data_savepath
 		if not os.path.exists(save_path):
 			print("no path found!")
 			return -1
@@ -264,26 +275,26 @@ class get_data():
 			if shuffle:
 				random.shuffle(groups_list)
 		self.groups_list = groups_list
-		self.data_savepath = save_path
 		return 0
 
 
-	def save_file(self, save_path, groups=1000):
+	def save_file(self, groups=64, dataset_offset=0):
 		"""
 		loads images from a saved path and sets it as self.images
 		Current assumptions:
 			- the data and labels are of the same size in the 0th axis
 			- the corresponding data and labels are a 1 to 1 mapping. 
 		Args:
-			save_path
-				- the path of the saved file
 			groups
 				- n sized groups to split the data into.
 				- default is 1000 datapoints/group
+			dataset_offset
+				- This is number to be added to i when saving dataset numbers, only affects the name.
 		Returns:
 			 0: success
 			-1: no data found
 		"""
+		save_path = self.data_savepath
 		if self.images is None and self.labels is None:
 			print("no data to save!")
 			return -1
@@ -294,26 +305,45 @@ class get_data():
 			pass
 		assert len(self.labels) == len(self.images)
 
-		with h5py.File(save_path, "w") as file:
-			labels_grp = file.create_group("labels")
-			images_grp = file.create_group("images")
+		with h5py.File(save_path, "a") as file:
+			if not "labels" in file:
+				labels_grp = file.create_group("labels")
+			else: 
+				labels_grp = file["labels"]
+			if not "images" in file:
+				images_grp = file.create_group("images")
+			else: 
+				images_grp = file["images"]
 			num_data = self.labels.shape[0]
 			for i in range(num_data//groups+int(bool(num_data%groups))):
 				data_start_index = i*groups
 				data_end_index = data_start_index+min(groups, num_data-data_start_index)
-				ldset = labels_grp.create_dataset("%d"%i, data=self.labels[data_start_index:data_end_index])
-				idset = images_grp.create_dataset("%d"%i, data=self.images[data_start_index:data_end_index])
+				#print("%d"%(i+dataset_offset))
+				ldset = labels_grp.create_dataset("%d"%(i+dataset_offset), data=self.labels[data_start_index:data_end_index])
+				idset = images_grp.create_dataset("%d"%(i+dataset_offset), data=self.images[data_start_index:data_end_index])
 				ldset.attrs["length"] = data_end_index - data_start_index
 				idset.attrs["length"] = data_end_index - data_start_index
 
-
+	def save_by_group(self, labels, filenames, groups):
+		"""
+		loads in data by groups and saves them accordingly.
+		"""
+		save_path = self.data_savepath
+		num_data = len(filenames)
+		num_groups = num_data//groups+int(bool(num_data%groups))
+		for i in range(num_groups):
+			print("\r"+loading_bar(i, num_groups), end="")
+			start_num = i*groups
+			self.set_labels(labels[start_num:(i+1)*groups])
+			self.get_images_from_filenames(filenames[start_num:(i+1)*groups], False)
+			self.save_file(groups, dataset_offset=start_num)
 
 	def set_labels(self, labels):
 		#sets the labels
 		self.labels = np.asarray(labels)
 
 
-	def get_images_from_filenames(self, filenames_list):
+	def get_images_from_filenames(self, filenames_list, print_loading_bar=True):
 		#given a list of filenames, will retrieve the image data
 		"""
 		Current assumptions:
@@ -327,7 +357,8 @@ class get_data():
 		images = None
 		#filenames_list = np.asarray(filenames_list).reshape(-1,)
 		for i in range(len(filenames_list)):
-			print("\r"+loading_bar(i, len(filenames_list)), end="")
+			if print_loading_bar:
+				print("\r"+loading_bar(i, len(filenames_list)), end="")
 			image = lycon.load(filenames_list[i])
 			#print("MIN, MAX", np.amin(image.numpy()), np.amax(image.numpy()))
 			if images is None:
@@ -335,8 +366,8 @@ class get_data():
 				images[i] = image
 			else:
 				images[i] = image
-
-		print()
+		if print_loading_bar:
+			print()
 		self.images = images
 		#tf.disable_eager_execution()
 
@@ -360,6 +391,22 @@ def shuffle_arrays(*args, **kwargs):
 		new_data.append(i[idx])
 	return new_data
 
+
+def upscale2d(x, factor=2):
+	##########
+	#This function was taken from https://github.com/tkarras/progressive_growing_of_gans/blob/master/networks.py and modified
+	#This is used to reproduce the same upscaling as in the paper, modified to our purposes
+	#please check out their work: PGGANs.
+	##########
+	assert isinstance(factor, int) and factor >= 1
+	if factor == 1: return x
+	with tf.variable_scope('Upscale2D'):
+		s = x.shape
+		x = tf.reshape(x, [-1, s[1], 1, s[2], 1, s[3]])
+		x = tf.tile(x, [1, 1, factor, 1, factor, 1])
+		x = tf.reshape(x, [-1, s[1] * factor, s[2] * factor, s[3]])
+	return x
+
 def cross_entropy(inputs, pred, epsilon=1e-7):
 	#we need to flatten our data, so we can reduce it per batch.
 	inputs = tf.contrib.layers.flatten(inputs)
@@ -372,8 +419,7 @@ def cross_entropy(inputs, pred, epsilon=1e-7):
 			axis=1)
 
 def kl_divergence(mean, log_var):
-	return 0.5*tf.reduce_sum(tf.exp(log_var)+tf.square(mean)-1-log_var,axis=1)
-
+	return 0.5*(tf.exp(log_var)+tf.square(mean)-1-log_var)
 
 
 def create_image_grid(images, aspect_ratio=[1,1]):
@@ -385,6 +431,8 @@ def create_image_grid(images, aspect_ratio=[1,1]):
 	#find the bounding box:
 	bounding_box = np.asarray(aspect_ratio)
 	while(1):
+		#print(bounding_box)
+		#print(np.prod(bounding_box), num_images)
 		if np.prod(bounding_box) >= num_images:
 			break
 		bounding_box+=1
@@ -396,3 +444,11 @@ def create_image_grid(images, aspect_ratio=[1,1]):
 		col_num = i//bounding_box[0]%bounding_box[1]*images.shape[2]
 		final_image[row_num:row_num+images.shape[1], col_num:col_num+images.shape[2]] = images[i,:,:,:]
 	return np.squeeze(final_image)
+
+def find_largest_factors(num):
+	assert num == num//1
+	possible_factors = list(range(int(num//num**0.5+1)))
+	possible_factors.reverse()
+	for i in possible_factors:
+		if num/i == num//i:
+			return int(i), int(num/i)
